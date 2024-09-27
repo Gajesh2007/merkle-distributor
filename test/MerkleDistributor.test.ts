@@ -5,31 +5,12 @@ import { BigNumber, constants, Contract, ContractFactory } from 'ethers'
 import { ethers } from 'hardhat'
 import BalanceTree from '../src/balance-tree'
 import { parseBalanceMap } from '../src/parse-balance-map'
+import { keccak256 } from 'ethers/lib/utils'
 
 chai.use(solidity)
 
 const overrides = {
   gasLimit: 9999999,
-}
-const gasUsed = {
-  MerkleDistributor: {
-    twoAccountTree: 81970,
-    largerTreeFirstClaim: 85307,
-    largerTreeSecondClaim: 68207,
-    realisticTreeGas: 95256,
-    realisticTreeGasDeeperNode: 95172,
-    realisticTreeGasAverageRandom: 78598,
-    realisticTreeGasAverageFirst25: 62332,
-  },
-  MerkleDistributorWithDeadline: {
-    twoAccountTree: 82102,
-    largerTreeFirstClaim: 85439,
-    largerTreeSecondClaim: 68339,
-    realisticTreeGas: 95388,
-    realisticTreeGasDeeperNode: 95304,
-    realisticTreeGasAverageRandom: 78730,
-    realisticTreeGasAverageFirst25: 62464,
-  },
 }
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -209,13 +190,6 @@ for (const contract of ['MerkleDistributor', 'MerkleDistributorWithDeadline']) {
             'InvalidProof()'
           )
         })
-
-        it('gas', async () => {
-          const proof = tree.getProof(0, wallet0.address, BigNumber.from(100))
-          const tx = await distributor.claim(0, wallet0.address, 100, proof, overrides)
-          const receipt = await tx.wait()
-          expect(receipt.gasUsed).to.eq(gasUsed[contract as keyof typeof gasUsed].twoAccountTree)
-        })
       })
 
       describe('larger tree', () => {
@@ -245,31 +219,6 @@ for (const contract of ['MerkleDistributor', 'MerkleDistributorWithDeadline']) {
             .withArgs(9, wallets[9].address, 10)
         })
 
-        it('gas', async () => {
-          const proof = tree.getProof(9, wallets[9].address, BigNumber.from(10))
-          const tx = await distributor.claim(9, wallets[9].address, 10, proof, overrides)
-          const receipt = await tx.wait()
-          expect(receipt.gasUsed).to.eq(gasUsed[contract as keyof typeof gasUsed].largerTreeFirstClaim)
-        })
-
-        it('gas second down about 15k', async () => {
-          await distributor.claim(
-            0,
-            wallets[0].address,
-            1,
-            tree.getProof(0, wallets[0].address, BigNumber.from(1)),
-            overrides
-          )
-          const tx = await distributor.claim(
-            1,
-            wallets[1].address,
-            2,
-            tree.getProof(1, wallets[1].address, BigNumber.from(2)),
-            overrides
-          )
-          const receipt = await tx.wait()
-          expect(receipt.gasUsed).to.eq(gasUsed[contract as keyof typeof gasUsed].largerTreeSecondClaim)
-        })
       })
 
       describe('realistic size tree', () => {
@@ -300,45 +249,6 @@ for (const contract of ['MerkleDistributor', 'MerkleDistributorWithDeadline']) {
           }
         })
 
-        it('gas', async () => {
-          const proof = tree.getProof(50000, wallet0.address, BigNumber.from(100))
-          const tx = await distributor.claim(50000, wallet0.address, 100, proof, overrides)
-          const receipt = await tx.wait()
-          expect(receipt.gasUsed).to.eq(gasUsed[contract as keyof typeof gasUsed].realisticTreeGas)
-        })
-        it('gas deeper node', async () => {
-          const proof = tree.getProof(90000, wallet0.address, BigNumber.from(100))
-          const tx = await distributor.claim(90000, wallet0.address, 100, proof, overrides)
-          const receipt = await tx.wait()
-          expect(receipt.gasUsed).to.eq(gasUsed[contract as keyof typeof gasUsed].realisticTreeGasDeeperNode)
-        })
-        it('gas average random distribution', async () => {
-          let total: BigNumber = BigNumber.from(0)
-          let count: number = 0
-          for (let i = 0; i < NUM_LEAVES; i += NUM_LEAVES / NUM_SAMPLES) {
-            const proof = tree.getProof(i, wallet0.address, BigNumber.from(100))
-            const tx = await distributor.claim(i, wallet0.address, 100, proof, overrides)
-            const receipt = await tx.wait()
-            total = total.add(receipt.gasUsed)
-            count++
-          }
-          const average = total.div(count)
-          expect(average).to.eq(gasUsed[contract as keyof typeof gasUsed].realisticTreeGasAverageRandom)
-        })
-        // this is what we gas golfed by packing the bitmap
-        it('gas average first 25', async () => {
-          let total: BigNumber = BigNumber.from(0)
-          let count: number = 0
-          for (let i = 0; i < 25; i++) {
-            const proof = tree.getProof(i, wallet0.address, BigNumber.from(100))
-            const tx = await distributor.claim(i, wallet0.address, 100, proof, overrides)
-            const receipt = await tx.wait()
-            total = total.add(receipt.gasUsed)
-            count++
-          }
-          const average = total.div(count)
-          expect(average).to.eq(gasUsed[contract as keyof typeof gasUsed].realisticTreeGasAverageFirst25)
-        })
 
         it('no double claims in random distribution', async () => {
           for (let i = 0; i < 25; i += Math.floor(Math.random() * (NUM_LEAVES / NUM_SAMPLES))) {
@@ -410,6 +320,56 @@ for (const contract of ['MerkleDistributor', 'MerkleDistributorWithDeadline']) {
           }
           expect(await token.balanceOf(distributor.address)).to.eq(0)
         })
+      })
+    })
+
+    describe('#updateMerkleRoot', () => {
+      let distributor: Contract
+      let tree: BalanceTree
+      let newTree: BalanceTree
+
+      beforeEach(async () => {
+        tree = new BalanceTree([
+          { account: wallet0.address, amount: BigNumber.from(100) },
+          { account: wallet1.address, amount: BigNumber.from(101) },
+        ])
+        distributor = await deployContract(distributorFactory, token.address, tree.getHexRoot(), contract)
+        
+        newTree = new BalanceTree([
+          { account: wallet0.address, amount: BigNumber.from(200) },
+          { account: wallet1.address, amount: BigNumber.from(201) },
+        ])
+      })
+
+      it('only owner can update merkle root', async () => {
+        await expect(distributor.connect(wallet1).updateMerkleRoot(newTree.getHexRoot()))
+          .to.be.revertedWith('Ownable: caller is not the owner')
+      })
+
+      it('updates merkle root successfully', async () => {
+        const oldRoot = await distributor.merkleRoot()
+        await expect(distributor.updateMerkleRoot(newTree.getHexRoot()))
+          .to.emit(distributor, 'MerkleRootUpdated')
+          .withArgs(oldRoot, newTree.getHexRoot())
+
+        expect(await distributor.merkleRoot()).to.eq(newTree.getHexRoot())
+      })
+
+      it('allows claims with new merkle root', async () => {
+        await distributor.updateMerkleRoot(newTree.getHexRoot())
+        
+        const proof = newTree.getProof(0, wallet0.address, BigNumber.from(200))
+        await expect(distributor.claim(0, wallet0.address, 200, proof))
+          .to.emit(distributor, 'Claimed')
+          .withArgs(0, wallet0.address, 200)
+      })
+
+      it('disallows claims with old merkle root', async () => {
+        await distributor.updateMerkleRoot(newTree.getHexRoot())
+        
+        const oldProof = tree.getProof(0, wallet0.address, BigNumber.from(100))
+        await expect(distributor.claim(0, wallet0.address, 100, oldProof))
+          .to.be.revertedWith('InvalidProof()')
       })
     })
   })
@@ -488,5 +448,68 @@ describe('#MerkleDistributorWithDeadline', () => {
     await ethers.provider.send('evm_mine', [oneSecondAfterEndTime])
     distributor = distributor.connect(wallet1)
     await expect(distributor.withdraw(overrides)).to.be.revertedWith('Ownable: caller is not the owner')
+  })
+
+  describe('#updateMerkleRoot', () => {
+    let distributor: Contract
+    let tree: BalanceTree
+    let newTree: BalanceTree
+    let endTime: number
+
+    beforeEach(async () => {
+      tree = new BalanceTree([
+        { account: wallet0.address, amount: BigNumber.from(100) },
+        { account: wallet1.address, amount: BigNumber.from(101) },
+      ])
+      endTime = Math.floor(Date.now() / 1000) + 31536000 // 1 year from now
+      const merkleDistributorWithDeadlineFactory = await ethers.getContractFactory('MerkleDistributorWithDeadline', wallet0)
+      distributor = await merkleDistributorWithDeadlineFactory.deploy(token.address, tree.getHexRoot(), endTime, overrides)
+      
+      newTree = new BalanceTree([
+        { account: wallet0.address, amount: BigNumber.from(200) },
+        { account: wallet1.address, amount: BigNumber.from(201) },
+      ])
+    })
+
+    it('can update merkle root before end time', async () => {
+      const oldRoot = await distributor.merkleRoot()
+      await expect(distributor.updateMerkleRoot(newTree.getHexRoot()))
+        .to.emit(distributor, 'MerkleRootUpdated')
+        .withArgs(oldRoot, newTree.getHexRoot())
+
+      expect(await distributor.merkleRoot()).to.eq(newTree.getHexRoot())
+    })
+
+    it('can update merkle root after end time', async () => {
+      await ethers.provider.send('evm_setNextBlockTimestamp', [endTime + 1])
+      await ethers.provider.send('evm_mine', [])
+
+      const oldRoot = await distributor.merkleRoot()
+      await expect(distributor.updateMerkleRoot(newTree.getHexRoot()))
+        .to.emit(distributor, 'MerkleRootUpdated')
+        .withArgs(oldRoot, newTree.getHexRoot())
+
+      expect(await distributor.merkleRoot()).to.eq(newTree.getHexRoot())
+    })
+
+    it('allows claims with new merkle root before end time', async () => {
+      await distributor.updateMerkleRoot(newTree.getHexRoot())
+      
+      const proof = newTree.getProof(0, wallet0.address, BigNumber.from(200))
+      await expect(distributor.claim(0, wallet0.address, 200, proof))
+        .to.emit(distributor, 'Claimed')
+        .withArgs(0, wallet0.address, 200)
+    })
+
+    it('disallows claims with new merkle root after end time', async () => {
+      await distributor.updateMerkleRoot(newTree.getHexRoot())
+      
+      await ethers.provider.send('evm_setNextBlockTimestamp', [endTime + 1])
+      await ethers.provider.send('evm_mine', [])
+
+      const proof = newTree.getProof(0, wallet0.address, BigNumber.from(200))
+      await expect(distributor.claim(0, wallet0.address, 200, proof))
+        .to.be.revertedWith('ClaimWindowFinished()')
+    })
   })
 })

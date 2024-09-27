@@ -4,18 +4,22 @@ pragma solidity =0.8.17;
 import {IERC20, SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {IMerkleDistributor} from "./interfaces/IMerkleDistributor.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 error AlreadyClaimed();
 error InvalidProof();
+error UnauthorizedUpdate();
 
-contract MerkleDistributor is IMerkleDistributor {
+contract MerkleDistributor is IMerkleDistributor, Ownable {
     using SafeERC20 for IERC20;
 
     address public immutable override token;
-    bytes32 public immutable override merkleRoot;
+    bytes32 public override merkleRoot;
 
     // This is a packed array of booleans.
     mapping(uint256 => uint256) private claimedBitMap;
+
+    event MerkleRootUpdated(bytes32 oldRoot, bytes32 newRoot);
 
     constructor(address token_, bytes32 merkleRoot_) {
         token = token_;
@@ -52,5 +56,11 @@ contract MerkleDistributor is IMerkleDistributor {
         IERC20(token).safeTransfer(account, amount);
 
         emit Claimed(index, account, amount);
+    }
+
+    function updateMerkleRoot(bytes32 newMerkleRoot) public onlyOwner {
+        bytes32 oldRoot = merkleRoot;
+        merkleRoot = newMerkleRoot;
+        emit MerkleRootUpdated(oldRoot, newMerkleRoot);
     }
 }
